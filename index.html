@@ -1,0 +1,456 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>WYSIWYG Drag & Drop</title>
+    <style>
+        :root {
+            --main-color: rgb(0, 0, 0);
+            --secondary-color: rgb(255, 255, 255);
+            --border-radius: 0px;
+            background: var(--secondary-color);
+            color: var(--main-color);
+        }
+
+        body {
+            font-family: sans-serif;
+            padding: 1rem;
+        }
+
+        [contenteditable]:focus {
+            outline: none !important;
+        }
+
+        #editor {
+            border: 1px solid var(--main-color);
+            border-radius: var(--border-radius);
+            background: var(--secondary-color);
+            padding: 1rem;
+            min-height: 300px;
+            outline: none;
+        }
+
+        .draggable {
+            position: relative;
+            width: 100%;
+            background: #c1c1c1;
+            border: 1px solid transparent;
+        }
+
+        .draggable:focus-within {
+            background: var(--secondary-color);
+            ;
+        }
+
+        .drag-handle {
+            background: var(--secondary-color);
+            ;
+            position: absolute;
+            margin-left: -18px;
+            top: 50%;
+            transform: translateY(-50%);
+            width: 16px;
+            height: 100%;
+            background-image: url("dots.svg");
+            background-size: contain;
+            background-repeat: no-repeat;
+            background-position: center;
+            background-color: var(--main-color);
+            cursor: move;
+            display: none;
+            border-radius: var(--border-radius);
+            border: var(--main-color) solid 1px;
+            overflow: visible;
+        }
+
+        .draggable:hover .drag-handle {
+            display: block;
+        }
+
+        .drag-handle:hover {
+            border: var(--main-color) solid 1px;
+            display: block;
+        }
+
+        .currently-dragging {
+            position: fixed;
+            opacity: 0.1;
+        }
+
+        .placeholder {
+            height: 5px;
+            width: 100%;
+            background-color: var(--main-color);
+            margin: 5px;
+        }
+
+        #slash-menu {
+            display: none;
+            position: absolute;
+            background: var(--secondary-color);
+            border: 1px solid var(--main-color);
+            border-radius: var(--border-radius);
+        }
+
+        body.show-all-handles .drag-handle {
+            display: block !important;
+        }
+
+        code {
+            background: var(--secondary-color);
+            padding: 5px;
+        }
+    </style>
+</head>
+
+<body>
+    <h1 style="width: 100%; text-align: center">WYSIWYG with Drag & Drop and slash commands</h1>
+    <div id="editor" contenteditable="true"></div>
+    <div id="slash-menu" style="display:none; position:absolute; z-index:1000;"></div>
+    <script>
+        const editor = document.getElementById('editor');
+        const menu = document.getElementById('slash-menu');
+        const blockTypes = [
+            { label: 'Heading 1', tag: 'h1' },
+            { label: 'Heading 2', tag: 'h2' },
+            { label: 'List', tag: 'ul' },
+            { label: 'Code', tag: 'pre' },
+            { label: 'Paragraph', tag: 'p' },
+            { label: 'Blockquote', tag: 'blockquote' },
+            { label: 'Table', tag: 'table' }
+        ];
+
+        function levenshtein(a, b) {
+            const dp = Array(a.length + 1).fill().map(() => Array(b.length + 1).fill(0));
+            for (let i = 0; i <= a.length; i++) dp[i][0] = i;
+            for (let j = 0; j <= b.length; j++) dp[0][j] = j;
+            for (let i = 1; i <= a.length; i++) {
+                for (let j = 1; j <= b.length; j++) {
+                    const cost = a[i - 1] === b[j - 1] ? 0 : 1;
+                    dp[i][j] = Math.min(dp[i - 1][j] + 1, dp[i][j - 1] + 1, dp[i - 1][j - 1] + cost);
+                }
+            }
+            return dp[a.length][b.length];
+        }
+
+        let currentMatch = null;
+        let menuOpen = false;
+
+        editor.addEventListener('keyup', e => {
+            const sel = window.getSelection();
+            if (!sel.rangeCount) return;
+            const range = sel.getRangeAt(0);
+            const node = range.startContainer;
+            const text = node.textContent;
+            const pos = range.startOffset;
+            const idx = text.lastIndexOf('/', pos);
+            if (idx === -1) { menu.style.display = 'none'; currentMatch = null; return; }
+            menuOpen = true;
+            const query = text.slice(idx + 1, pos).toLowerCase().trim();
+            if (!query) { menu.style.display = 'none'; currentMatch = null; return; }
+
+            const digits = (query.match(/\d+/) || [''])[0];
+            const all = blockTypes.map(b => ({
+                ...b,
+                dist: levenshtein(query, b.label.toLowerCase())
+            }));
+
+            let group1 = [], group2 = [];
+            if (digits) {
+                all.forEach(x => {
+                    if (x.label.includes(digits)) group1.push(x);
+                    else group2.push(x);
+                });
+            } else {
+                group1 = all;
+            }
+            group1.sort((a, b) => a.dist - b.dist);
+            group2.sort((a, b) => a.dist - b.dist);
+            const matches = digits ? group1.concat(group2) : group1;
+
+            menu.innerHTML = '';
+            matches.forEach(m => {
+                const d = document.createElement('div');
+                d.textContent = m.label;
+                d.style.padding = '4px';
+                d.style.cursor = 'pointer';
+                d.addEventListener('click', () => apply(m));
+                menu.appendChild(d);
+            });
+
+            const rect = range.getBoundingClientRect();
+            menu.style.top = `${rect.bottom + window.scrollY}px`;
+            menu.style.left = `${rect.left + window.scrollX}px`;
+            menu.style.display = 'block';
+            currentMatch = { node, idx, pos, matches };
+        });
+
+        function apply(m) {
+            const { node, idx, pos } = currentMatch;
+            const wrapper = node.parentElement.closest('.draggable');
+
+            wrapper.remove();
+
+            let newEl = document.createElement(m.tag);
+
+            switch (m.tag) {
+                case 'ul': {
+                    const li = document.createElement('li');
+                    li.textContent = 'Listenelement';
+                    newEl.appendChild(li);
+                    break;
+                }
+                case 'pre': {
+                    const pre = document.createElement('pre');
+                    const code = document.createElement('code');
+                    code.textContent = 'Code';
+                    pre.appendChild(code);
+                    newEl = pre;
+                    break;
+                }
+                case 'blockquote': {
+                    newEl.textContent = 'Quotation';
+                    break;
+                }
+                case 'img': {
+                    const img = document.createElement('img');
+                    img.src = 'dein-bild-url.jpg';
+                    img.alt = 'Picture';
+                    newEl = img;
+                    break;
+                }
+                default:
+                    newEl.textContent = m.label;
+                    break;
+            }
+
+            insertBlock(newEl);
+
+            menu.style.display = 'none';
+            currentMatch = null;
+        }
+        editor.addEventListener('keydown', (e) => {
+            if (e.key === 'Enter' && currentMatch) {
+                const query = currentMatch.node.textContent
+                    .slice(currentMatch.slashIndex + 1, currentMatch.cursorPos)
+                    .trim()
+                    .toLowerCase();
+
+                const match = blockTypes.find(b =>
+                    b.label.toLowerCase().includes(query)
+                );
+
+                if (match) {
+                    e.preventDefault();
+                    applySlashCommand(match.tag, currentMatch.slashIndex, currentMatch.cursorPos, currentMatch.node);
+                    menu.style.display = 'none';
+                    currentMatch = null;
+                }
+            } else if (e.key === ' ') {
+                menu.style.display = 'none';
+                currentMatch = null;
+            } else if (e.key === 'Escape') {
+                menu.style.display = 'none';
+                currentMatch = null;
+            }
+        });
+
+
+        function applySlashCommand(tag, start, end, node) {
+            const before = node.textContent.slice(0, start);
+            const after = node.textContent.slice(end);
+            const wrapper = node.parentNode.closest('.draggable');
+            if (!wrapper) return;
+
+            const blockType = blockTypes.find(b => b.tag === tag);
+            if (!blockType) return;
+
+            const newEl = document.createElement(tag);
+            newEl.textContent = blockType.label || 'Neuer Block';
+
+            if (tag === 'ul') {
+                const li = document.createElement('li');
+                li.textContent = 'Listenelement';
+                newEl.appendChild(li);
+            }
+
+            const newWrapper = document.createElement('div');
+            newWrapper.className = 'draggable';
+            const handle = document.createElement('div');
+            handle.className = 'drag-handle';
+            newWrapper.appendChild(handle);
+            newWrapper.appendChild(newEl);
+
+            wrapper.replaceWith(newWrapper);
+            makeDraggable(newWrapper);
+        }
+
+
+        function getCaretCoordinates() {
+            const sel = window.getSelection();
+            if (!sel.rangeCount) return { top: 0, left: 0 };
+
+            const range = sel.getRangeAt(0).cloneRange();
+            range.collapse(true);
+            const rect = range.getClientRects()[0];
+            if (!rect) return { top: 0, left: 0 };
+            return { top: rect.top + window.scrollY, left: rect.left + window.scrollX };
+        }
+
+        function getCaretCoordinates() {
+            const sel = window.getSelection();
+            if (!sel.rangeCount) return { top: 0, left: 0 };
+
+            const range = sel.getRangeAt(0).cloneRange();
+            range.collapse(true);
+            const rect = range.getClientRects()[0];
+            if (!rect) return { top: 0, left: 0 };
+            return { top: rect.top + window.scrollY, left: rect.left + window.scrollX };
+        }
+
+        function makeDraggable(el) {
+            const handle = el.querySelector('.drag-handle');
+            handle.contentEditable = "false";
+            handle.onmousedown = function (e) {
+                e.preventDefault();
+
+                const editor = document.getElementById('editor');
+                let offsetY = e.clientY;
+                let isDragging = false;
+                let placeholder = document.createElement('div');
+                placeholder.className = 'placeholder';
+
+                el.classList.add('currently-dragging');
+                el.style.zIndex = '1000';
+                el.style.pointerEvents = 'none';
+
+                document.body.classList.add('show-all-handles');
+
+                function onMouseMove(e) {
+
+                    if (!isDragging) {
+                        el.parentNode.insertBefore(placeholder, el.nextSibling);
+                        isDragging = true;
+                    }
+
+                    const all = [...editor.querySelectorAll('.draggable')].filter(d => d !== el);
+                    let inserted = false;
+
+                    for (const target of all) {
+                        const rect = target.getBoundingClientRect();
+                        if (e.clientY < rect.top + rect.height / 2) {
+                            if (target !== placeholder.nextSibling) {
+                                editor.insertBefore(el, target);
+                                editor.insertBefore(placeholder, el.nextSibling);
+                            }
+                            inserted = true;
+                            break;
+                        }
+                    }
+
+                    if (!inserted && editor.lastElementChild !== el) {
+                        editor.appendChild(el);
+                        editor.appendChild(placeholder);
+                    }
+                }
+
+                function onMouseUp() {
+                    el.style.transform = '';
+                    el.style.zIndex = '';
+                    el.style.pointerEvents = '';
+                    el.classList.remove('currently-dragging');
+                    document.body.classList.remove('show-all-handles');
+
+                    placeholder.remove();
+                    document.removeEventListener('mousemove', onMouseMove);
+                    document.removeEventListener('mouseup', onMouseUp);
+                }
+
+                document.addEventListener('mousemove', onMouseMove);
+                document.addEventListener('mouseup', onMouseUp);
+            };
+        }
+
+        function insertBlock(el) {
+            const wrapper = document.createElement('div');
+            wrapper.className = 'draggable';
+            const handle = document.createElement('div');
+            handle.className = 'drag-handle';
+            wrapper.appendChild(handle);
+            wrapper.appendChild(el);
+
+            editor.appendChild(wrapper);
+            makeDraggable(wrapper);
+
+            const range = document.createRange();
+            const sel = window.getSelection();
+            range.selectNodeContents(el);
+            range.collapse(false);
+            sel.removeAllRanges();
+            sel.addRange(range);
+        }
+
+        function placeCaretAtEnd(el) {
+            el.focus();
+            const range = document.createRange();
+            range.selectNodeContents(el);
+            range.collapse(false);
+            const sel = window.getSelection();
+            sel.removeAllRanges();
+            sel.addRange(range);
+        }
+
+        editor.addEventListener('keydown', (e) => {
+            if (e.key === 'Enter') {
+                if (e.shiftKey) {
+                    return;
+                }
+
+                if (currentMatch && menu.style.display === 'block') {
+                    e.preventDefault();
+                    apply(currentMatch.matches[0]);
+                    menu.style.display = 'none';
+                    currentMatch = null;
+                } else {
+                    e.preventDefault();
+                    const p = document.createElement('p');
+                    p.textContent = '';
+                    insertBlock(p);
+                    placeCaretAtEnd(p);
+                }
+            }
+
+            if (e.key === 'Backspace') {
+                const sel = window.getSelection();
+                if (!sel.rangeCount) return;
+                const node = sel.getRangeAt(0).startContainer;
+                const wrapper = node.parentElement.closest('.draggable');
+                const isEmpty = wrapper && wrapper.textContent.trim() === '';
+
+                if (isEmpty) {
+                    e.preventDefault();
+                    const prev = wrapper.previousElementSibling;
+                    wrapper.remove();
+                    if (prev && prev.querySelector('[contenteditable], *')) {
+                        const focusTarget = prev.querySelector('[contenteditable]') || prev;
+                        const range = document.createRange();
+                        const sel = window.getSelection();
+                        range.selectNodeContents(focusTarget);
+                        range.collapse(false);
+                        sel.removeAllRanges();
+                        sel.addRange(range);
+                        focusTarget.focus();
+                    }
+                }
+                if (editor.children.length === 0) {
+                    const p = document.createElement('p');
+                    p.textContent = '';
+                    insertBlock(p);
+                }
+
+            }
+        });
+        insertBlock(document.createElement('p'));
+    </script>
+</body>
+</html>
